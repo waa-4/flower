@@ -2,80 +2,117 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- Better mobile / tablet support -->
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no"
+  >
+
+  <meta name="theme-color" content="#000000">
 
   <title>Voice</title>
 
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
     html,
     body {
+      margin: 0;
+      padding: 0;
+
       width: 100%;
       height: 100%;
-      overflow: hidden;
 
       background: #000;
-      color: #000;
+      overflow: hidden;
+
+      overscroll-behavior: none;
+      touch-action: manipulation;
+
+      -webkit-user-select: none;
+      user-select: none;
+
+      -webkit-tap-highlight-color: transparent;
     }
 
     body {
       position: fixed;
       inset: 0;
+      background: #000;
     }
 
-    /* Invisible fullscreen button.
-       Browsers require the user to interact once
-       before microphone/audio access can begin. */
-    #startButton {
+    /*
+      Entire page is the start button.
+
+      It is visually pure black.
+      The user just taps/clicks anywhere once.
+    */
+
+    #start {
       position: fixed;
       inset: 0;
 
       width: 100%;
       height: 100%;
 
-      border: none;
-      outline: none;
+      margin: 0;
+      padding: 0;
+
+      border: 0;
+      outline: 0;
+
+      appearance: none;
+      -webkit-appearance: none;
 
       background: #000;
-      color: #000;
+      color: transparent;
 
-      cursor: default;
+      cursor: pointer;
     }
 
-    #startButton.started {
+    #start.hidden {
       display: none;
+    }
+
+    /*
+      Keeps the whole screen black even if
+      the browser highlights/focuses something.
+    */
+
+    * {
+      background-color: #000;
     }
   </style>
 </head>
 
 <body>
 
-<button id="startButton" aria-label="Start"></button>
+<button
+  id="start"
+  type="button"
+  aria-label="Start microphone"
+></button>
 
 <script>
+"use strict";
+
 /* ==========================================================
    SETTINGS
    ========================================================== */
 
-const VOICE_FOLDER = "voice/";
+const VOICE_FOLDER = "./voice/";
 
 /*
-Put the names of the audio files inside your "voice" folder here.
+Put the EXACT filenames from your voice folder here.
 
-Example repo:
+Supports formats such as:
 
-index.html
+.mp3
+.wav
+.ogg
+.m4a
 
-voice/
-  voice1.mp3
-  voice2.mp3
-  scream.mp3
-  hello.wav
+Browser support varies by format,
+so MP3 is usually the safest.
 */
 
 const voiceFiles = [
@@ -87,144 +124,334 @@ const voiceFiles = [
 
 
 /*
-How loud something needs to be before it counts as speech.
+Microphone sensitivity.
 
-LOWER = more sensitive
-HIGHER = less sensitive
+Smaller = easier to trigger.
+Larger = needs louder sound.
 
 Try:
-0.02 - very sensitive
-0.04 - normal
-0.08 - loud voice only
+
+0.015 = extremely sensitive
+0.025 = sensitive
+0.035 = normal
+0.050 = louder speech
 */
 
-const VOICE_THRESHOLD = 0.04;
+const VOICE_THRESHOLD = 0.03;
 
 
 /*
-Wait this many milliseconds after detecting somebody.
-2000 = 2 seconds.
+The person must be making sound for this long
+before it counts as actual speech.
+
+This helps prevent:
+
+keyboard taps
+chair noises
+small bumps
+random microphone noise
+*/
+
+const REQUIRED_VOICE_TIME = 120;
+
+
+/*
+Wait 2 seconds after detecting the voice.
 */
 
 const RESPONSE_DELAY = 2000;
 
 
 /*
-Prevents it from constantly triggering repeatedly.
-
-After a sound is triggered, it waits this long
-before allowing another voice detection.
+How long after the website finishes speaking
+before microphone detection activates again.
 */
 
-const COOLDOWN = 4000;
+const AFTER_AUDIO_COOLDOWN = 1200;
+
+
+/*
+Minimum time between triggers.
+
+Helps stop accidental rapid triggering.
+*/
+
+const MIN_TRIGGER_GAP = 3000;
 
 
 /* ==========================================================
-   VARIABLES
+   GLOBAL VARIABLES
    ========================================================== */
 
-let audioContext;
-let analyser;
-let microphone;
-let dataArray;
+let audioContext = null;
 
-let listening = false;
-let triggered = false;
-let audioPlaying = false;
+let analyser = null;
+let microphoneSource = null;
+let mediaStream = null;
 
-let lastPlayed = -1;
+let dataArray = null;
+
+let running = false;
+let waitingToReply = false;
+let voiceAudioPlaying = false;
+
+let voiceStartedAt = null;
+let lastTriggerTime = 0;
+
+let currentAudio = null;
+
+let previousVoiceIndex = -1;
+
+const startButton =
+  document.getElementById("start");
 
 
 /* ==========================================================
-   START
+   AUDIO CONTEXT SUPPORT
    ========================================================== */
 
-const startButton = document.getElementById("startButton");
+function createAudioContext() {
 
-startButton.addEventListener("click", startVoiceSystem);
+  const AudioContextClass =
+    window.AudioContext ||
+    window.webkitAudioContext;
 
-async function startVoiceSystem() {
-  try {
-
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true
-      }
-    });
-
-
-    audioContext = new (
-      window.AudioContext ||
-      window.webkitAudioContext
-    )();
-
-
-    await audioContext.resume();
-
-
-    microphone =
-      audioContext.createMediaStreamSource(stream);
-
-
-    analyser =
-      audioContext.createAnalyser();
-
-
-    analyser.fftSize = 1024;
-
-    analyser.smoothingTimeConstant = 0.4;
-
-
-    microphone.connect(analyser);
-
-
-    dataArray =
-      new Uint8Array(analyser.fftSize);
-
-
-    listening = true;
-
-
-    startButton.classList.add("started");
-
-
-    detectVoice();
-
-  } catch (error) {
+  if (!AudioContextClass) {
 
     console.error(
-      "Could not access microphone:",
+      "Web Audio API is not supported on this device."
+    );
+
+    return null;
+  }
+
+  return new AudioContextClass();
+}
+
+
+/* ==========================================================
+   MICROPHONE CONSTRAINTS
+   ========================================================== */
+
+function getMicrophoneConstraints() {
+
+  return {
+
+    audio: {
+
+      /*
+        These are requests rather than guarantees.
+        Browsers/devices that don't support one
+        generally ignore it.
+      */
+
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+
+      channelCount: 1
+
+    },
+
+    video: false
+  };
+}
+
+
+/* ==========================================================
+   START SYSTEM
+   ========================================================== */
+
+async function startSystem() {
+
+  /*
+    Disable immediately so double taps don't create
+    several microphone streams.
+  */
+
+  startButton.disabled = true;
+
+  try {
+
+    /*
+      Create audio context from the actual user tap.
+      Important for Safari/iOS.
+    */
+
+    if (!audioContext) {
+
+      audioContext =
+        createAudioContext();
+    }
+
+    if (!audioContext) {
+
+      throw new Error(
+        "AudioContext unavailable"
+      );
+    }
+
+
+    /*
+      Resume if mobile browser created it suspended.
+    */
+
+    if (
+      audioContext.state === "suspended"
+    ) {
+
+      await audioContext.resume();
+    }
+
+
+    /*
+      Request microphone.
+    */
+
+    mediaStream =
+      await navigator.mediaDevices.getUserMedia(
+        getMicrophoneConstraints()
+      );
+
+
+    setupMicrophone();
+
+
+    running = true;
+
+
+    /*
+      Hide button after everything succeeds.
+    */
+
+    startButton.classList.add("hidden");
+
+
+    detectionLoop();
+
+
+    console.log(
+      "Voice listener started."
+    );
+
+  }
+
+  catch (error) {
+
+    console.error(
+      "Could not start microphone:",
       error
     );
+
+
+    /*
+      Let the user tap again after an error.
+    */
+
+    startButton.disabled = false;
 
   }
 }
 
 
 /* ==========================================================
-   VOICE DETECTION
+   SET UP MICROPHONE
    ========================================================== */
 
-function detectVoice() {
+function setupMicrophone() {
 
-  requestAnimationFrame(detectVoice);
+  /*
+    Remove an older source if one exists.
+  */
 
+  if (microphoneSource) {
+
+    try {
+      microphoneSource.disconnect();
+    }
+    catch (error) {}
+  }
+
+
+  microphoneSource =
+    audioContext.createMediaStreamSource(
+      mediaStream
+    );
+
+
+  analyser =
+    audioContext.createAnalyser();
+
+
+  /*
+    Larger FFT gives stable microphone readings
+    across more devices.
+  */
+
+  analyser.fftSize = 2048;
+
+  analyser.smoothingTimeConstant = 0.65;
+
+
+  microphoneSource.connect(analyser);
+
+
+  dataArray =
+    new Uint8Array(
+      analyser.fftSize
+    );
+}
+
+
+/* ==========================================================
+   DETECTION LOOP
+   ========================================================== */
+
+function detectionLoop() {
+
+  requestAnimationFrame(
+    detectionLoop
+  );
+
+
+  if (!running)
+    return;
+
+
+  if (!analyser)
+    return;
+
+
+  if (waitingToReply)
+    return;
+
+
+  if (voiceAudioPlaying)
+    return;
+
+
+  /*
+    Suspended contexts can happen when:
+    - phone is locked
+    - tab goes into background
+    - browser pauses audio
+  */
 
   if (
-    !listening ||
-    triggered ||
-    audioPlaying
+    audioContext &&
+    audioContext.state !== "running"
   ) {
+
     return;
   }
 
 
-  analyser.getByteTimeDomainData(dataArray);
+  analyser.getByteTimeDomainData(
+    dataArray
+  );
 
 
-  let total = 0;
+  let sum = 0;
 
 
   for (
@@ -236,37 +463,115 @@ function detectVoice() {
     const sample =
       (dataArray[i] - 128) / 128;
 
-    total += sample * sample;
+    sum +=
+      sample * sample;
 
   }
 
 
   const volume =
     Math.sqrt(
-      total / dataArray.length
+      sum / dataArray.length
     );
 
 
-  if (volume > VOICE_THRESHOLD) {
-
-    voiceDetected();
-
-  }
-
+  checkVoice(volume);
 }
 
 
 /* ==========================================================
-   WHEN VOICE IS HEARD
+   CHECK FOR VOICE
    ========================================================== */
 
-function voiceDetected() {
+function checkVoice(volume) {
 
-  if (triggered)
+  const now =
+    performance.now();
+
+
+  /*
+    Too soon after the previous trigger.
+  */
+
+  if (
+    now - lastTriggerTime <
+    MIN_TRIGGER_GAP
+  ) {
+
+    voiceStartedAt = null;
+
+    return;
+  }
+
+
+  if (
+    volume >= VOICE_THRESHOLD
+  ) {
+
+    /*
+      First frame of detected sound.
+    */
+
+    if (
+      voiceStartedAt === null
+    ) {
+
+      voiceStartedAt = now;
+
+      return;
+    }
+
+
+    /*
+      Sound continued long enough.
+    */
+
+    const voiceLength =
+      now - voiceStartedAt;
+
+
+    if (
+      voiceLength >=
+      REQUIRED_VOICE_TIME
+    ) {
+
+      voiceStartedAt = null;
+
+      detectedVoice();
+    }
+
+  }
+
+  else {
+
+    /*
+      Sound stopped before it counted
+      as actual voice.
+    */
+
+    voiceStartedAt = null;
+  }
+}
+
+
+/* ==========================================================
+   VOICE DETECTED
+   ========================================================== */
+
+function detectedVoice() {
+
+  if (waitingToReply)
     return;
 
 
-  triggered = true;
+  if (voiceAudioPlaying)
+    return;
+
+
+  waitingToReply = true;
+
+  lastTriggerTime =
+    performance.now();
 
 
   console.log(
@@ -274,130 +579,467 @@ function voiceDetected() {
   );
 
 
-  setTimeout(() => {
+  setTimeout(
+    async () => {
 
-    playRandomVoice();
+      /*
+        Mobile browsers occasionally suspend
+        the context while waiting.
+      */
 
-  }, RESPONSE_DELAY);
+      await ensureAudioRunning();
 
+
+      playRandomVoice();
+
+    },
+
+    RESPONSE_DELAY
+  );
 }
 
 
 /* ==========================================================
-   RANDOM VOICE
+   KEEP AUDIO CONTEXT RUNNING
    ========================================================== */
 
-function playRandomVoice() {
+async function ensureAudioRunning() {
 
-  if (voiceFiles.length === 0) {
-
-    console.warn(
-      "No files are listed in voiceFiles."
-    );
-
-    resetListener();
-
+  if (!audioContext)
     return;
+
+
+  if (
+    audioContext.state === "suspended"
+  ) {
+
+    try {
+
+      await audioContext.resume();
+
+    }
+
+    catch (error) {
+
+      console.warn(
+        "Could not resume audio context.",
+        error
+      );
+    }
+  }
+}
+
+
+/* ==========================================================
+   RANDOM FILE
+   ========================================================== */
+
+function getRandomVoice() {
+
+  if (
+    voiceFiles.length === 0
+  ) {
+
+    return null;
   }
 
 
-  let randomIndex;
+  if (
+    voiceFiles.length === 1
+  ) {
+
+    previousVoiceIndex = 0;
+
+    return voiceFiles[0];
+  }
 
 
-  /*
-  Avoid immediately playing the same sound twice
-  if multiple sounds exist.
-  */
+  let index;
+
 
   do {
 
-    randomIndex =
+    index =
       Math.floor(
         Math.random() *
         voiceFiles.length
       );
 
-  } while (
-    randomIndex === lastPlayed &&
-    voiceFiles.length > 1
+  }
+
+  while (
+    index ===
+    previousVoiceIndex
   );
 
 
-  lastPlayed =
-    randomIndex;
+  previousVoiceIndex =
+    index;
 
+
+  return voiceFiles[index];
+}
+
+
+/* ==========================================================
+   PLAY RANDOM VOICE
+   ========================================================== */
+
+async function playRandomVoice() {
 
   const filename =
-    voiceFiles[randomIndex];
+    getRandomVoice();
 
 
-  const audio =
-    new Audio(
-      VOICE_FOLDER +
-      encodeURIComponent(filename)
+  if (!filename) {
+
+    console.warn(
+      "No voice files configured."
     );
 
+    resetDetection();
 
-  audioPlaying = true;
+    return;
+  }
 
 
   /*
-  Temporarily stop listening so the website
-  doesn't hear its OWN voice and trigger itself.
+    Stop an older sound if somehow one exists.
   */
 
-  listening = false;
+  stopCurrentAudio();
 
+
+  const url =
+    VOICE_FOLDER +
+    encodeURIComponent(filename);
+
+
+  const audio =
+    new Audio();
+
+
+  currentAudio = audio;
+
+
+  /*
+    preload helps desktop + mobile browsers
+    begin playback more reliably.
+  */
+
+  audio.preload = "auto";
+
+
+  /*
+    Do not loop.
+  */
+
+  audio.loop = false;
+
+
+  /*
+    Maximum normal volume.
+  */
 
   audio.volume = 1;
 
 
-  audio.play()
-    .catch(error => {
+  voiceAudioPlaying = true;
 
-      console.error(
-        "Audio failed:",
-        error
-      );
 
-      audioPlaying = false;
+  /*
+    Set source last.
+  */
 
-      resetListener();
-
-    });
+  audio.src = url;
 
 
   audio.addEventListener(
     "ended",
-    () => {
-
-      audioPlaying = false;
-
-      setTimeout(
-        resetListener,
-        COOLDOWN
-      );
-
-    },
+    audioFinished,
     {
       once: true
     }
   );
 
+
+  audio.addEventListener(
+    "error",
+    audioFailed,
+    {
+      once: true
+    }
+  );
+
+
+  try {
+
+    /*
+      Safari and Chrome both return promises
+      from play() on newer versions.
+    */
+
+    const result =
+      audio.play();
+
+
+    if (
+      result &&
+      typeof result.then === "function"
+    ) {
+
+      await result;
+    }
+
+  }
+
+  catch (error) {
+
+    console.error(
+      "Audio playback failed:",
+      error
+    );
+
+    audioFailed();
+  }
 }
 
 
 /* ==========================================================
-   RESET
+   AUDIO FINISHED
    ========================================================== */
 
-function resetListener() {
+function audioFinished() {
 
-  triggered = false;
+  voiceAudioPlaying = false;
 
-  listening = true;
+  currentAudio = null;
 
+
+  setTimeout(
+    resetDetection,
+    AFTER_AUDIO_COOLDOWN
+  );
 }
+
+
+/* ==========================================================
+   AUDIO FAILED
+   ========================================================== */
+
+function audioFailed() {
+
+  voiceAudioPlaying = false;
+
+  currentAudio = null;
+
+
+  setTimeout(
+    resetDetection,
+    500
+  );
+}
+
+
+/* ==========================================================
+   STOP CURRENT AUDIO
+   ========================================================== */
+
+function stopCurrentAudio() {
+
+  if (!currentAudio)
+    return;
+
+
+  try {
+
+    currentAudio.pause();
+
+    currentAudio.currentTime = 0;
+
+  }
+
+  catch (error) {}
+
+
+  currentAudio = null;
+
+  voiceAudioPlaying = false;
+}
+
+
+/* ==========================================================
+   RESET DETECTOR
+   ========================================================== */
+
+function resetDetection() {
+
+  waitingToReply = false;
+
+  voiceStartedAt = null;
+
+  lastTriggerTime =
+    performance.now();
+}
+
+
+/* ==========================================================
+   PAGE VISIBILITY SUPPORT
+   ========================================================== */
+
+/*
+Phones commonly suspend microphone/audio when the
+browser becomes inactive.
+
+Try to restore everything when the page comes back.
+*/
+
+document.addEventListener(
+  "visibilitychange",
+  async () => {
+
+    if (
+      document.visibilityState ===
+      "visible"
+    ) {
+
+      await ensureAudioRunning();
+    }
+  }
+);
+
+
+/* ==========================================================
+   WINDOW FOCUS SUPPORT
+   ========================================================== */
+
+window.addEventListener(
+  "focus",
+  async () => {
+
+    await ensureAudioRunning();
+  }
+);
+
+
+/* ==========================================================
+   MOBILE TOUCH RECOVERY
+   ========================================================== */
+
+/*
+Some versions of Safari won't resume audio after
+leaving the browser until another interaction occurs.
+
+Any later touch/click will attempt to wake audio back up.
+*/
+
+async function wakeAudio() {
+
+  await ensureAudioRunning();
+}
+
+
+document.addEventListener(
+  "touchstart",
+  wakeAudio,
+  {
+    passive: true
+  }
+);
+
+
+document.addEventListener(
+  "pointerdown",
+  wakeAudio,
+  {
+    passive: true
+  }
+);
+
+
+/* ==========================================================
+   MICROPHONE DISCONNECT DETECTION
+   ========================================================== */
+
+function monitorMicrophone() {
+
+  if (!mediaStream)
+    return;
+
+
+  const tracks =
+    mediaStream.getAudioTracks();
+
+
+  for (
+    const track of tracks
+  ) {
+
+    track.addEventListener(
+      "ended",
+      () => {
+
+        console.warn(
+          "Microphone disconnected."
+        );
+
+        running = false;
+
+        startButton.classList.remove(
+          "hidden"
+        );
+
+        startButton.disabled = false;
+
+      }
+    );
+  }
+}
+
+
+/* ==========================================================
+   START BUTTON EVENTS
+   ========================================================== */
+
+startButton.addEventListener(
+  "click",
+  async () => {
+
+    await startSystem();
+
+    monitorMicrophone();
+  }
+);
+
+
+/*
+Pointer event helps some touch devices.
+The click listener remains the actual startup event.
+*/
+
+startButton.addEventListener(
+  "pointerup",
+  () => {},
+  {
+    passive: true
+  }
+);
+
+
+/* ==========================================================
+   GETUSERMEDIA SUPPORT CHECK
+   ========================================================== */
+
+if (
+  !navigator.mediaDevices ||
+  !navigator.mediaDevices.getUserMedia
+) {
+
+  console.error(
+    "Microphone access is not supported by this browser."
+  );
+}
+
 </script>
 
 </body>
