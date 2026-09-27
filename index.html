@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <title>Voice</title>
+
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+
+      background: #000;
+      color: #000;
+    }
+
+    body {
+      position: fixed;
+      inset: 0;
+    }
+
+    /* Invisible fullscreen button.
+       Browsers require the user to interact once
+       before microphone/audio access can begin. */
+    #startButton {
+      position: fixed;
+      inset: 0;
+
+      width: 100%;
+      height: 100%;
+
+      border: none;
+      outline: none;
+
+      background: #000;
+      color: #000;
+
+      cursor: default;
+    }
+
+    #startButton.started {
+      display: none;
+    }
+  </style>
+</head>
+
+<body>
+
+<button id="startButton" aria-label="Start"></button>
+
+<script>
+/* ==========================================================
+   SETTINGS
+   ========================================================== */
+
+const VOICE_FOLDER = "voice/";
+
+/*
+Put the names of the audio files inside your "voice" folder here.
+
+Example repo:
+
+index.html
+
+voice/
+  voice1.mp3
+  voice2.mp3
+  scream.mp3
+  hello.wav
+*/
+
+const voiceFiles = [
+  "voice1.mp3",
+  "voice2.mp3",
+  "voice3.mp3",
+  "voice4.mp3"
+];
+
+
+/*
+How loud something needs to be before it counts as speech.
+
+LOWER = more sensitive
+HIGHER = less sensitive
+
+Try:
+0.02 - very sensitive
+0.04 - normal
+0.08 - loud voice only
+*/
+
+const VOICE_THRESHOLD = 0.04;
+
+
+/*
+Wait this many milliseconds after detecting somebody.
+2000 = 2 seconds.
+*/
+
+const RESPONSE_DELAY = 2000;
+
+
+/*
+Prevents it from constantly triggering repeatedly.
+
+After a sound is triggered, it waits this long
+before allowing another voice detection.
+*/
+
+const COOLDOWN = 4000;
+
+
+/* ==========================================================
+   VARIABLES
+   ========================================================== */
+
+let audioContext;
+let analyser;
+let microphone;
+let dataArray;
+
+let listening = false;
+let triggered = false;
+let audioPlaying = false;
+
+let lastPlayed = -1;
+
+
+/* ==========================================================
+   START
+   ========================================================== */
+
+const startButton = document.getElementById("startButton");
+
+startButton.addEventListener("click", startVoiceSystem);
+
+async function startVoiceSystem() {
+  try {
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      }
+    });
+
+
+    audioContext = new (
+      window.AudioContext ||
+      window.webkitAudioContext
+    )();
+
+
+    await audioContext.resume();
+
+
+    microphone =
+      audioContext.createMediaStreamSource(stream);
+
+
+    analyser =
+      audioContext.createAnalyser();
+
+
+    analyser.fftSize = 1024;
+
+    analyser.smoothingTimeConstant = 0.4;
+
+
+    microphone.connect(analyser);
+
+
+    dataArray =
+      new Uint8Array(analyser.fftSize);
+
+
+    listening = true;
+
+
+    startButton.classList.add("started");
+
+
+    detectVoice();
+
+  } catch (error) {
+
+    console.error(
+      "Could not access microphone:",
+      error
+    );
+
+  }
+}
+
+
+/* ==========================================================
+   VOICE DETECTION
+   ========================================================== */
+
+function detectVoice() {
+
+  requestAnimationFrame(detectVoice);
+
+
+  if (
+    !listening ||
+    triggered ||
+    audioPlaying
+  ) {
+    return;
+  }
+
+
+  analyser.getByteTimeDomainData(dataArray);
+
+
+  let total = 0;
+
+
+  for (
+    let i = 0;
+    i < dataArray.length;
+    i++
+  ) {
+
+    const sample =
+      (dataArray[i] - 128) / 128;
+
+    total += sample * sample;
+
+  }
+
+
+  const volume =
+    Math.sqrt(
+      total / dataArray.length
+    );
+
+
+  if (volume > VOICE_THRESHOLD) {
+
+    voiceDetected();
+
+  }
+
+}
+
+
+/* ==========================================================
+   WHEN VOICE IS HEARD
+   ========================================================== */
+
+function voiceDetected() {
+
+  if (triggered)
+    return;
+
+
+  triggered = true;
+
+
+  console.log(
+    "Voice detected."
+  );
+
+
+  setTimeout(() => {
+
+    playRandomVoice();
+
+  }, RESPONSE_DELAY);
+
+}
+
+
+/* ==========================================================
+   RANDOM VOICE
+   ========================================================== */
+
+function playRandomVoice() {
+
+  if (voiceFiles.length === 0) {
+
+    console.warn(
+      "No files are listed in voiceFiles."
+    );
+
+    resetListener();
+
+    return;
+  }
+
+
+  let randomIndex;
+
+
+  /*
+  Avoid immediately playing the same sound twice
+  if multiple sounds exist.
+  */
+
+  do {
+
+    randomIndex =
+      Math.floor(
+        Math.random() *
+        voiceFiles.length
+      );
+
+  } while (
+    randomIndex === lastPlayed &&
+    voiceFiles.length > 1
+  );
+
+
+  lastPlayed =
+    randomIndex;
+
+
+  const filename =
+    voiceFiles[randomIndex];
+
+
+  const audio =
+    new Audio(
+      VOICE_FOLDER +
+      encodeURIComponent(filename)
+    );
+
+
+  audioPlaying = true;
+
+
+  /*
+  Temporarily stop listening so the website
+  doesn't hear its OWN voice and trigger itself.
+  */
+
+  listening = false;
+
+
+  audio.volume = 1;
+
+
+  audio.play()
+    .catch(error => {
+
+      console.error(
+        "Audio failed:",
+        error
+      );
+
+      audioPlaying = false;
+
+      resetListener();
+
+    });
+
+
+  audio.addEventListener(
+    "ended",
+    () => {
+
+      audioPlaying = false;
+
+      setTimeout(
+        resetListener,
+        COOLDOWN
+      );
+
+    },
+    {
+      once: true
+    }
+  );
+
+}
+
+
+/* ==========================================================
+   RESET
+   ========================================================== */
+
+function resetListener() {
+
+  triggered = false;
+
+  listening = true;
+
+}
+</script>
+
+</body>
+</html>
