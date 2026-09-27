@@ -26,10 +26,13 @@
       height: 100%;
       background: #000;
       overflow: hidden;
+
       overscroll-behavior: none;
       touch-action: manipulation;
+
       -webkit-user-select: none;
       user-select: none;
+
       -webkit-tap-highlight-color: transparent;
     }
 
@@ -45,8 +48,8 @@
       width: 100%;
       height: 100%;
 
-      border: 0;
-      outline: 0;
+      border: none;
+      outline: none;
 
       appearance: none;
       -webkit-appearance: none;
@@ -68,7 +71,7 @@
 <button
   id="start"
   type="button"
-  aria-label="Start"
+  aria-label="Start microphone"
 ></button>
 
 <script>
@@ -76,39 +79,73 @@
 
 
 /* ==========================================================
-   SETTINGS
+   CONFIG
    ========================================================== */
 
 const VOICE_FOLDER = "voice";
 
-const VOICE_THRESHOLD = 0.03;
 
-const REQUIRED_VOICE_TIME = 120;
+/*
+   Detect quiet speech more easily.
+*/
+
+const MIN_VOICE_THRESHOLD = 0.008;
+
+
+/*
+   How much louder than the normal room noise
+   something needs to be.
+*/
+
+const NOISE_MULTIPLIER = 1.9;
+
+
+/*
+   How long sound must remain voice-like.
+*/
+
+const REQUIRED_VOICE_TIME = 80;
+
+
+/*
+   Wait 2 seconds after detecting speech.
+*/
 
 const RESPONSE_DELAY = 2000;
 
-const AFTER_AUDIO_COOLDOWN = 1200;
-
-const MIN_TRIGGER_GAP = 3000;
-
-
-/* ==========================================================
-   OPTIONAL GITHUB SETTINGS
-   ========================================================== */
 
 /*
-Usually you can leave these blank.
+   Wait after a voice clip finishes before listening again.
+*/
 
-On a normal GitHub Pages URL like:
+const AFTER_AUDIO_COOLDOWN = 1000;
 
-https://waa-4.github.io/myproject/
 
-the script automatically works out:
+/*
+   Prevent rapid repeated triggers.
+*/
 
-owner = waa-4
-repo  = myproject
+const MIN_TRIGGER_GAP = 2500;
 
-If you're using a custom domain, fill these in.
+
+/*
+   Controls how slowly the site learns background noise.
+*/
+
+const NOISE_SMOOTHING = 0.985;
+
+
+/*
+   Number of recent microphone readings averaged together.
+*/
+
+const VOLUME_HISTORY_SIZE = 8;
+
+
+/*
+   Optional manual GitHub information.
+
+   Leave blank for normal GitHub Pages.
 */
 
 const GITHUB_OWNER = "";
@@ -146,19 +183,21 @@ let currentAudio = null;
 
 let previousVoiceIndex = -1;
 
+let noiseFloor = 0.005;
+
+let volumeHistory = [];
+
+let detectionFrame = null;
+
 const startButton =
   document.getElementById("start");
 
 
 /* ==========================================================
-   FIND GITHUB REPOSITORY
+   GITHUB REPO DETECTION
    ========================================================== */
 
 function getGitHubInfo() {
-
-  /*
-    Manual settings override automatic detection.
-  */
 
   if (
     GITHUB_OWNER &&
@@ -176,12 +215,6 @@ function getGitHubInfo() {
     window.location.hostname;
 
 
-  /*
-    Example:
-
-    waa-4.github.io
-  */
-
   if (
     hostname.endsWith(".github.io")
   ) {
@@ -190,33 +223,11 @@ function getGitHubInfo() {
       hostname.split(".")[0];
 
 
-    /*
-      Example:
-
-      /thingsnderps/index.html
-
-      becomes:
-
-      thingsnderps
-    */
-
     const parts =
       window.location.pathname
         .split("/")
         .filter(Boolean);
 
-
-    /*
-      User page:
-
-      https://waa-4.github.io/
-
-      has no repo path.
-
-      Its repository would normally be:
-
-      waa-4.github.io
-    */
 
     const repo =
       parts.length > 0
@@ -236,7 +247,7 @@ function getGitHubInfo() {
 
 
 /* ==========================================================
-   LOAD ALL WAV FILES AUTOMATICALLY
+   LOAD ALL WAV FILES
    ========================================================== */
 
 async function loadVoiceFiles() {
@@ -247,8 +258,8 @@ async function loadVoiceFiles() {
 
   if (!github) {
 
-    console.error(
-      "Could not automatically determine GitHub repository."
+    console.warn(
+      "Could not automatically detect GitHub repo."
     );
 
     return;
@@ -262,14 +273,15 @@ async function loadVoiceFiles() {
   try {
 
     const response =
-      await fetch(apiURL);
+      await fetch(apiURL, {
+        cache: "no-store"
+      });
 
 
     if (!response.ok) {
 
       throw new Error(
-        "GitHub API returned " +
-        response.status
+        `GitHub API error ${response.status}`
       );
     }
 
@@ -277,21 +289,6 @@ async function loadVoiceFiles() {
     const files =
       await response.json();
 
-
-    /*
-      Automatically accept ANY filename
-      ending in .wav.
-
-      Examples:
-
-      hi.wav
-      screaming.wav
-      banana explosion.wav
-      182736128.wav
-      AAAAAAAAA.wav
-
-      all work.
-    */
 
     voiceFiles =
       files
@@ -309,11 +306,6 @@ async function loadVoiceFiles() {
 
         .map(file => {
 
-          /*
-            download_url gives us the direct
-            raw WAV file.
-          */
-
           return {
             name: file.name,
             url: file.download_url
@@ -323,7 +315,7 @@ async function loadVoiceFiles() {
 
 
     console.log(
-      `Found ${voiceFiles.length} WAV files.`
+      `Loaded ${voiceFiles.length} WAV files.`
     );
 
 
@@ -338,16 +330,15 @@ async function loadVoiceFiles() {
   catch (error) {
 
     console.error(
-      "Could not load voice folder:",
+      "Failed to load voice folder:",
       error
     );
-
   }
 }
 
 
 /* ==========================================================
-   AUDIO CONTEXT
+   CREATE AUDIO CONTEXT
    ========================================================== */
 
 function createAudioContext() {
@@ -378,21 +369,7 @@ async function startSystem() {
 
   try {
 
-    /*
-      Load the WAV list.
-    */
-
     await loadVoiceFiles();
-
-
-    if (
-      voiceFiles.length === 0
-    ) {
-
-      console.warn(
-        "No .wav files were found inside /voice/"
-      );
-    }
 
 
     if (!audioContext) {
@@ -405,7 +382,7 @@ async function startSystem() {
     if (!audioContext) {
 
       throw new Error(
-        "Web Audio API unsupported"
+        "Web Audio API is unsupported."
       );
     }
 
@@ -418,6 +395,17 @@ async function startSystem() {
     }
 
 
+    if (
+      !navigator.mediaDevices ||
+      !navigator.mediaDevices.getUserMedia
+    ) {
+
+      throw new Error(
+        "Microphone access is unsupported."
+      );
+    }
+
+
     mediaStream =
       await navigator.mediaDevices.getUserMedia({
 
@@ -425,20 +413,29 @@ async function startSystem() {
 
           echoCancellation: true,
 
-          noiseSuppression: true,
+          /*
+             Disabled because it can sometimes remove
+             quiet/distant speech.
+          */
+
+          noiseSuppression: false,
 
           autoGainControl: true,
 
-          channelCount: 1
+          channelCount: 1,
+
+          sampleRate: 48000
 
         },
 
         video: false
-
       });
 
 
     setupMicrophone();
+
+
+    monitorMicrophone();
 
 
     running = true;
@@ -449,14 +446,14 @@ async function startSystem() {
     );
 
 
-    detectionLoop();
+    if (!detectionFrame) {
 
-
-    monitorMicrophone();
+      detectionLoop();
+    }
 
 
     console.log(
-      "Listening."
+      "Microphone listener started."
     );
 
   }
@@ -483,11 +480,8 @@ function setupMicrophone() {
   if (microphoneSource) {
 
     try {
-
       microphoneSource.disconnect();
-
     }
-
     catch (error) {}
 
   }
@@ -503,10 +497,15 @@ function setupMicrophone() {
     audioContext.createAnalyser();
 
 
-  analyser.fftSize = 2048;
+  /*
+     Larger buffer helps quieter sound detection.
+  */
+
+  analyser.fftSize = 4096;
+
 
   analyser.smoothingTimeConstant =
-    0.65;
+    0.75;
 
 
   microphoneSource.connect(
@@ -522,14 +521,144 @@ function setupMicrophone() {
 
 
 /* ==========================================================
-   LISTENING LOOP
+   GET MICROPHONE VOLUME
+   ========================================================== */
+
+function getMicrophoneVolume() {
+
+  analyser.getByteTimeDomainData(
+    dataArray
+  );
+
+
+  let total = 0;
+
+
+  for (
+    let i = 0;
+    i < dataArray.length;
+    i++
+  ) {
+
+    const sample =
+      (dataArray[i] - 128) / 128;
+
+
+    total +=
+      sample * sample;
+  }
+
+
+  const rms =
+    Math.sqrt(
+      total / dataArray.length
+    );
+
+
+  volumeHistory.push(
+    rms
+  );
+
+
+  if (
+    volumeHistory.length >
+    VOLUME_HISTORY_SIZE
+  ) {
+
+    volumeHistory.shift();
+  }
+
+
+  let average = 0;
+
+
+  for (
+    const value of volumeHistory
+  ) {
+
+    average += value;
+  }
+
+
+  average /=
+    volumeHistory.length;
+
+
+  return average;
+}
+
+
+/* ==========================================================
+   BACKGROUND NOISE LEARNING
+   ========================================================== */
+
+function updateNoiseFloor(volume) {
+
+  const probableSpeech =
+    volume >
+    Math.max(
+      MIN_VOICE_THRESHOLD,
+      noiseFloor * 2.4
+    );
+
+
+  /*
+     Don't teach the background system using actual speech.
+  */
+
+  if (probableSpeech) {
+
+    return;
+  }
+
+
+  noiseFloor =
+    (
+      noiseFloor *
+      NOISE_SMOOTHING
+    )
+    +
+    (
+      volume *
+      (1 - NOISE_SMOOTHING)
+    );
+
+
+  noiseFloor =
+    Math.max(
+      0.001,
+      Math.min(
+        noiseFloor,
+        0.08
+      )
+    );
+}
+
+
+/* ==========================================================
+   DYNAMIC SPEECH THRESHOLD
+   ========================================================== */
+
+function getVoiceThreshold() {
+
+  return Math.max(
+    MIN_VOICE_THRESHOLD,
+    noiseFloor *
+    NOISE_MULTIPLIER
+  );
+}
+
+
+/* ==========================================================
+   MAIN DETECTION LOOP
    ========================================================== */
 
 function detectionLoop() {
 
-  requestAnimationFrame(
-    detectionLoop
-  );
+  detectionFrame =
+    requestAnimationFrame(
+      detectionLoop
+    );
 
 
   if (!running)
@@ -557,41 +686,23 @@ function detectionLoop() {
   }
 
 
-  analyser.getByteTimeDomainData(
-    dataArray
+  const volume =
+    getMicrophoneVolume();
+
+
+  updateNoiseFloor(
+    volume
   );
 
 
-  let total = 0;
-
-
-  for (
-    let i = 0;
-    i < dataArray.length;
-    i++
-  ) {
-
-    const sample =
-      (dataArray[i] - 128) / 128;
-
-
-    total +=
-      sample * sample;
-  }
-
-
-  const volume =
-    Math.sqrt(
-      total / dataArray.length
-    );
-
-
-  checkVoice(volume);
+  checkVoice(
+    volume
+  );
 }
 
 
 /* ==========================================================
-   CHECK VOICE
+   CHECK FOR SPEECH
    ========================================================== */
 
 function checkVoice(volume) {
@@ -611,43 +722,64 @@ function checkVoice(volume) {
   }
 
 
+  const threshold =
+    getVoiceThreshold();
+
+
   if (
-    volume >= VOICE_THRESHOLD
+    volume >= threshold
   ) {
 
     if (
       voiceStartedAt === null
     ) {
 
-      voiceStartedAt = now;
+      voiceStartedAt =
+        now;
 
       return;
     }
 
 
+    const speakingTime =
+      now - voiceStartedAt;
+
+
     if (
-      now - voiceStartedAt >=
+      speakingTime >=
       REQUIRED_VOICE_TIME
     ) {
 
       voiceStartedAt = null;
 
-      voiceDetected();
 
+      voiceDetected();
     }
 
   }
 
   else {
 
-    voiceStartedAt = null;
+    /*
+       Allows tiny gaps inside speech.
+    */
 
+    if (
+      voiceStartedAt !== null &&
+      now - voiceStartedAt < 180
+    ) {
+
+      return;
+    }
+
+
+    voiceStartedAt = null;
   }
 }
 
 
 /* ==========================================================
-   VOICE DETECTED
+   SPEECH DETECTED
    ========================================================== */
 
 function voiceDetected() {
@@ -660,16 +792,24 @@ function voiceDetected() {
     return;
 
 
-  waitingToReply = true;
+  waitingToReply =
+    true;
+
 
   lastTriggerTime =
     performance.now();
+
+
+  console.log(
+    "Voice detected."
+  );
 
 
   setTimeout(
     async () => {
 
       await ensureAudioRunning();
+
 
       playRandomVoice();
 
@@ -681,7 +821,7 @@ function voiceDetected() {
 
 
 /* ==========================================================
-   RANDOM WAV
+   RANDOM VOICE
    ========================================================== */
 
 function getRandomVoice() {
@@ -698,7 +838,9 @@ function getRandomVoice() {
     voiceFiles.length === 1
   ) {
 
-    previousVoiceIndex = 0;
+    previousVoiceIndex =
+      0;
+
 
     return voiceFiles[0];
   }
@@ -744,8 +886,9 @@ async function playRandomVoice() {
   if (!voice) {
 
     console.warn(
-      "No WAV files available."
+      "No WAV files were found."
     );
+
 
     resetDetection();
 
@@ -810,7 +953,17 @@ async function playRandomVoice() {
 
   try {
 
-    await audio.play();
+    const playResult =
+      audio.play();
+
+
+    if (
+      playResult &&
+      typeof playResult.then === "function"
+    ) {
+
+      await playResult;
+    }
 
   }
 
@@ -828,14 +981,17 @@ async function playRandomVoice() {
 
 
 /* ==========================================================
-   FINISH
+   AUDIO FINISHED
    ========================================================== */
 
 function audioFinished() {
 
-  voiceAudioPlaying = false;
+  voiceAudioPlaying =
+    false;
 
-  currentAudio = null;
+
+  currentAudio =
+    null;
 
 
   setTimeout(
@@ -845,32 +1001,24 @@ function audioFinished() {
 }
 
 
+/* ==========================================================
+   AUDIO FAILED
+   ========================================================== */
+
 function audioFailed() {
 
-  voiceAudioPlaying = false;
+  voiceAudioPlaying =
+    false;
 
-  currentAudio = null;
+
+  currentAudio =
+    null;
 
 
   setTimeout(
     resetDetection,
     500
   );
-}
-
-
-/* ==========================================================
-   RESET
-   ========================================================== */
-
-function resetDetection() {
-
-  waitingToReply = false;
-
-  voiceStartedAt = null;
-
-  lastTriggerTime =
-    performance.now();
 }
 
 
@@ -888,21 +1036,44 @@ function stopCurrentAudio() {
 
     currentAudio.pause();
 
-    currentAudio.currentTime = 0;
+    currentAudio.currentTime =
+      0;
 
   }
 
   catch (error) {}
 
 
-  currentAudio = null;
+  currentAudio =
+    null;
 
-  voiceAudioPlaying = false;
+
+  voiceAudioPlaying =
+    false;
 }
 
 
 /* ==========================================================
-   RESUME MOBILE AUDIO
+   RESET LISTENING
+   ========================================================== */
+
+function resetDetection() {
+
+  waitingToReply =
+    false;
+
+
+  voiceStartedAt =
+    null;
+
+
+  lastTriggerTime =
+    performance.now();
+}
+
+
+/* ==========================================================
+   RESUME AUDIO
    ========================================================== */
 
 async function ensureAudioRunning() {
@@ -912,8 +1083,7 @@ async function ensureAudioRunning() {
 
 
   if (
-    audioContext.state ===
-    "suspended"
+    audioContext.state === "suspended"
   ) {
 
     try {
@@ -922,14 +1092,18 @@ async function ensureAudioRunning() {
 
     }
 
-    catch (error) {}
+    catch (error) {
 
+      console.warn(
+        "Could not resume audio context."
+      );
+    }
   }
 }
 
 
 /* ==========================================================
-   TAB / PHONE RECOVERY
+   PHONE / TABLET TAB RECOVERY
    ========================================================== */
 
 document.addEventListener(
@@ -942,7 +1116,6 @@ document.addEventListener(
     ) {
 
       await ensureAudioRunning();
-
     }
   }
 );
@@ -950,13 +1123,19 @@ document.addEventListener(
 
 window.addEventListener(
   "focus",
-  ensureAudioRunning
+  async () => {
+
+    await ensureAudioRunning();
+  }
 );
 
 
 document.addEventListener(
   "pointerdown",
-  ensureAudioRunning,
+  async () => {
+
+    await ensureAudioRunning();
+  },
   {
     passive: true
   }
@@ -965,7 +1144,10 @@ document.addEventListener(
 
 document.addEventListener(
   "touchstart",
-  ensureAudioRunning,
+  async () => {
+
+    await ensureAudioRunning();
+  },
   {
     passive: true
   }
@@ -994,7 +1176,13 @@ function monitorMicrophone() {
       "ended",
       () => {
 
-        running = false;
+        console.warn(
+          "Microphone stopped."
+        );
+
+
+        running =
+          false;
 
 
         startButton.classList.remove(
@@ -1002,8 +1190,8 @@ function monitorMicrophone() {
         );
 
 
-        startButton.disabled = false;
-
+        startButton.disabled =
+          false;
       }
     );
   }
